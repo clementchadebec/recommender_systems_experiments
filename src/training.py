@@ -4,6 +4,16 @@ import torch.nn as nn
 from torch.optim.lr_scheduler import MultiStepLR
 from tqdm import tqdm
 import pdb
+from copy import deepcopy
+import os
+
+import importlib
+
+def wandb_is_available():
+    return importlib.util.find_spec("wandb") is not None
+
+if wandb_is_available():
+    import wandb
 
 def train_byol_model(model, dataset, args):
     metric_vad = []
@@ -440,15 +450,10 @@ def train_pythae_model(model, dataset, args):
                 anneal = args.anneal_cap
 
 
-            loss, elbo = model.loss_function(batch_train, anneal)
+            model_out = model(batch_train, anneal)
 
-            # loglikelihood part
-            #log_softmax_var = nn.LogSoftmax(dim=-1)(logits)
-            #neg_ll = -torch.mean(torch.sum(log_softmax_var * batch_train, dim=1))
+            loss, elbo = model_out.loss, model_out.elbo
 
-            # compute objective
-            #neg_ELBO = neg_ll + anneal * KL
-            #neg_ELBO.backward()
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
@@ -463,11 +468,9 @@ def train_pythae_model(model, dataset, args):
         with torch.no_grad():
             metric_dist = []
             for bnum, batch_val in enumerate(dataset.next_val_batch()):
-                #pdb.set_trace()
                 reshaped_batch = batch_val[0].repeat((args.n_val_samples, 1))
                 is_training_ph = int(args.n_val_samples > 1)
-                pred_val, _, _, _, _ = model(reshaped_batch, is_training_ph=is_training_ph)
-                pred_val = pred_val.mean(0)
+                pred_val = model(reshaped_batch, is_training_ph=is_training_ph).logits
                 pred_val = pred_val.view((args.n_val_samples, *batch_val[0].shape)).mean(0)
                 X = batch_val[0].cpu().detach().numpy()
                 pred_val = pred_val.cpu().detach().numpy()
@@ -481,14 +484,42 @@ def train_pythae_model(model, dataset, args):
 
             # update the best model (if necessary)
             if current_metric > best_metric:
-                torch.save(model,
-                           '../models/best_model_{}_data_{}_K_{}_N_{}_learnreverse_{}_anneal_{}_lrdec_{}_lrenc_{}_learntransitions_{}_initstepsize_{}.pt'.format(
-                               args.model, args.data, args.K,
-                               args.N,
-                               args.learnable_reverse,
-                               args.annealing, args.lrdec, args.lrenc, args.learntransitions, args.gamma))
+                best_model = deepcopy(model)
+                #torch.save(model,
+                #           '../models/best_model_{}_data_{}_K_{}_N_{}_learnreverse_{}_anneal_{}_lrdec_{}_lrenc_{}_learntransitions_{}_initstepsize_{}.pt'.format(
+                #               args.model, args.data, args.K,
+                #               args.N,
+                #               args.learnable_reverse,
+                #               args.annealing, args.lrdec, args.lrenc, args.learntransitions, args.gamma))
                 best_metric = current_metric
             if epoch % print_info_ == 0:
                 print('Best NDCG:', best_metric)
                 print('Current NDCG:', current_metric)
+
+            if wandb_is_available():
+                wandb.log(
+                    {
+                        "train/loss": loss,
+                        "train/elbo": elbo,
+                        "eval/NDCG": current_metric,
+                        "eval/best_NDCG": best_metric
+                    }
+                )
+
+    path = '../models/'
+
+
+    if not os.path.exists(path):
+        os.makedirs(path)
+
+    #torch.save(model,
+    #       os.path.join(path, 'best_model_{}_data_{}_K_{}_N_{}_learnreverse_{}_anneal_{}_lrdec_{}_lrenc_{}_learntransitions_{}_initstepsize_{}.pt'.format(
+    #           args.model, args.data, args.K,
+    #           args.N,
+    #           args.learnable_reverse,
+    #           args.annealing, args.lrdec, args.lrenc, args.learntransitions, args.gamma)
+    #        )
+    #)
+
+
     return metric_vad
