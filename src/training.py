@@ -411,3 +411,84 @@ def train_met_model(model, dataset, args):
             print('Best NDCG:', best_metric)
             print('Current NDCG:', current_metric)
     return metric_vad
+
+
+
+def train_pythae_model(model, dataset, args):
+    metric_vad = []
+    best_metric = -np.inf
+    print_info_ = args.print_info_
+    update_count = 0.0
+
+    if args.lrenc is None:
+        lrenc = args.lrdec
+    else:
+        lrenc = args.lrenc
+
+    optimizer = torch.optim.Adam([
+        {'params': model.decoder.parameters(), 'lr': args.lrdec},
+        {'params': model.encoder.parameters()}
+    ],
+        lr=lrenc, weight_decay=args.l2_coeff)
+
+    for epoch in tqdm(range(args.n_epoches)):
+        model.train()
+        for bnum, batch_train in enumerate(dataset.next_train_batch()):
+            if args.total_anneal_steps > 0:
+                anneal = min(args.anneal_cap, 1. * update_count / args.total_anneal_steps)
+            else:
+                anneal = args.anneal_cap
+
+
+            loss, elbo = model.loss_function(batch_train, anneal)
+
+            # loglikelihood part
+            #log_softmax_var = nn.LogSoftmax(dim=-1)(logits)
+            #neg_ll = -torch.mean(torch.sum(log_softmax_var * batch_train, dim=1))
+
+            # compute objective
+            #neg_ELBO = neg_ll + anneal * KL
+            #neg_ELBO.backward()
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
+            if (bnum % 100 == 0) and (epoch % print_info_ == 0):
+                print(elbo.cpu().detach().numpy())
+
+            update_count += 1
+
+        # compute validation NDCG
+        model.eval()
+        with torch.no_grad():
+            metric_dist = []
+            for bnum, batch_val in enumerate(dataset.next_val_batch()):
+                #pdb.set_trace()
+                reshaped_batch = batch_val[0].repeat((args.n_val_samples, 1))
+                is_training_ph = int(args.n_val_samples > 1)
+                pred_val, _, _, _, _ = model(reshaped_batch, is_training_ph=is_training_ph)
+                pred_val = pred_val.mean(0)
+                pred_val = pred_val.view((args.n_val_samples, *batch_val[0].shape)).mean(0)
+                X = batch_val[0].cpu().detach().numpy()
+                pred_val = pred_val.cpu().detach().numpy()
+                # exclude examples from training and validation (if any)
+                pred_val[X.nonzero()] = -np.inf
+                metric_dist.append(args.metric(pred_val, batch_val[1]))
+
+            metric_dist = np.concatenate(metric_dist)
+            current_metric = metric_dist.mean()
+            metric_vad.append(current_metric)
+
+            # update the best model (if necessary)
+            if current_metric > best_metric:
+                torch.save(model,
+                           '../models/best_model_{}_data_{}_K_{}_N_{}_learnreverse_{}_anneal_{}_lrdec_{}_lrenc_{}_learntransitions_{}_initstepsize_{}.pt'.format(
+                               args.model, args.data, args.K,
+                               args.N,
+                               args.learnable_reverse,
+                               args.annealing, args.lrdec, args.lrenc, args.learntransitions, args.gamma))
+                best_metric = current_metric
+            if epoch % print_info_ == 0:
+                print('Best NDCG:', best_metric)
+                print('Current NDCG:', current_metric)
+    return metric_vad
